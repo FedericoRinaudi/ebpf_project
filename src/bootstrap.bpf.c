@@ -1,112 +1,177 @@
-// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-/* Copyright (c) 2020 Facebook */
-#include "vmlinux.h"
+#include <vmlinux.h>
+#include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
-#include <bpf/bpf_tracing.h>
-#include <bpf/bpf_core_read.h>
 #include "bootstrap.h"
 
-char LICENSE[] SEC("license") = "Dual BSD/GPL";
+#define IP_MF 0x2000
+#define IP_OFFSET 0x1FFF
+#define TC_ACT_OK 0
+#define ETH_P_IP 0x0800 /* Internet Protocol packet */
+#define ETH_HLEN 14
 
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 8192);
-	__type(key, pid_t);
-	__type(value, u64);
-} exec_start SEC(".maps");
 
-struct {
+struct
+{
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, 256 * 1024);
 } rb SEC(".maps");
 
-const volatile unsigned long long min_duration_ns = 0;
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, struct flow);
+    __type(value, __u8);
+} flow_map SEC(".maps");
 
-SEC("tp/sched/sched_process_exec")
-int handle_exec(struct trace_event_raw_sched_process_exec *ctx)
+
+SEC("xdp")
+int  xdp_parser_func(struct xdp_md *ctx)
 {
-	struct task_struct *task;
-	unsigned fname_off;
-	struct event *e;
-	pid_t pid;
-	u64 ts;
+	void *data_end = (void *) (long) ctx->data_end;
+	void *data = (void*) (long)ctx->data;
+	struct so_event *e;
+	struct ethhdr *eth = data;
+	struct iphdr *ip_v4;
+	struct tcphdr *tcp;
+	struct udphdr *udp;
+	void *l3_start = data + ETH_HLEN;
+	void *l4_start; 
+	void *tls_start;
+	__u16 h_proto, frag_off, ip_len;
+	__be16 l4_len;
+	__be16 tcp_len;
+	__u8 *value, l4_protocol;
+	struct flow fl = {};
+	struct tls_info tls = {};
 
-	/* remember time exec() was executed for this PID */
-	pid = bpf_get_current_pid_tgid() >> 32;
-	ts = bpf_ktime_get_ns();
-	bpf_map_update_elem(&exec_start, &pid, &ts, BPF_ANY);
 
-	/* don't emit exec events when minimum duration is specified */
-	if (min_duration_ns)
-		return 0;
+	if (data + sizeof(struct ethhdr) > data_end)
+		return XDP_PASS;
 
-	/* reserve sample from BPF ringbuf */
-	e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-	if (!e)
-		return 0;
+	h_proto = bpf_ntohs(eth->h_proto);
 
-	/* fill out the sample with data */
-	task = (struct task_struct *)bpf_get_current_task();
-
-	e->exit_event = false;
-	e->pid = pid;
-	e->ppid = BPF_CORE_READ(task, real_parent, tgid);
-	bpf_get_current_comm(&e->comm, sizeof(e->comm));
-
-	fname_off = ctx->__data_loc_filename & 0xFFFF;
-	bpf_probe_read_str(&e->filename, sizeof(e->filename), (void *)ctx + fname_off);
-
-	/* successfully submit it to user-space for post-processing */
-	bpf_ringbuf_submit(e, 0);
-	return 0;
-}
-
-SEC("tp/sched/sched_process_exit")
-int handle_exit(struct trace_event_raw_sched_process_template* ctx)
-{
-	struct task_struct *task;
-	struct event *e;
-	pid_t pid, tid;
-	u64 id, ts, *start_ts, duration_ns = 0;
 	
-	/* get PID and TID of exiting thread/process */
-	id = bpf_get_current_pid_tgid();
-	pid = id >> 32;
-	tid = (u32)id;
 
-	/* ignore thread exits */
-	if (pid != tid)
-		return 0;
+	if (h_proto != ETH_P_IP)
+	{
+		return XDP_PASS;
+	}
 
-	/* if we recorded start of the process, calculate lifetime duration */
-	start_ts = bpf_map_lookup_elem(&exec_start, &pid);
-	if (start_ts)
-		duration_ns = bpf_ktime_get_ns() - *start_ts;
-	else if (min_duration_ns)
-		return 0;
-	bpf_map_delete_elem(&exec_start, &pid);
+	//l3 management
+	//TODO: ipv6 support
+	ip_v4 = (struct iphdr *) l3_start;
+	if ((void*) ip_v4 + sizeof(struct iphdr) > data_end){
+		bpf_printk("No IP packet\n");
+		return XDP_PASS;
+	}
+	frag_off = bpf_ntohs(ip_v4->frag_off);
 
-	/* if process didn't live long enough, return early */
-	if (min_duration_ns && duration_ns < min_duration_ns)
-		return 0;
+	//TODO: fragmented packets support
+	if (frag_off & (IP_MF | IP_OFFSET))
+	{
+		bpf_printk("Fragmented IP packet\n");
+		return XDP_PASS;
+	}
+	ip_len = ip_v4->ihl << 2;
+	l4_protocol = ip_v4->protocol;
+	fl.src_addr = bpf_ntohl(ip_v4->saddr);
+	fl.dst_addr = bpf_ntohl(ip_v4->daddr);
 
-	/* reserve sample from BPF ringbuf */
+	l4_start = l3_start + ip_len;
+
+	switch (l4_protocol)
+	{
+		case IPPROTO_TCP:
+			tcp = (struct tcphdr *) l4_start;
+			if ((void*) tcp + sizeof(struct tcphdr) > data_end){
+				bpf_printk("No TCP packet\n");
+				return XDP_PASS;
+			}
+			fl.src_port = bpf_ntohs(tcp->source);
+			fl.dst_port = bpf_ntohs(tcp->dest);
+			fl.ip_proto = IPPROTO_TCP;
+			//l4_len = (__be16)(tcp->doff);
+			//l4_len <<= 2;
+			//da qua provo a commentate per veificare il funzionamento condizionato
+			tcp_len = (__be16)(tcp->doff);
+			tcp_len <<= 2;
+			tls_start = l4_start + tcp_len; //l4_len brakes it, i think its because the switch statement
+	
+			if (tls_start + 5 > data_end)
+			{
+				tls.content_type = 0;
+				goto output;
+			}
+
+			if (*((__u8*)tls_start) < 20 || *((__u8*)tls_start) > 24)
+			{		
+				tls.content_type = 0;
+			}
+			else
+			{
+				tls.content_type = *((__u8*)tls_start);
+				tls.message_type = *((__u8*)tls_start + 1);
+			}
+			break;
+		case IPPROTO_UDP:
+			udp = (struct udphdr *) l4_start;
+			if ((void*) udp + sizeof(struct udphdr) > data_end){
+				bpf_printk("No UDP packet\n");
+				return XDP_PASS;
+			}
+			fl.src_port = bpf_ntohs(udp->source);
+			fl.dst_port = bpf_ntohs(udp->dest);
+			fl.ip_proto = IPPROTO_UDP;
+			//l4_len = 8;
+			break;
+		default:
+			bpf_printk("Not a TCP or UDP packet\n");
+			return XDP_PASS;
+	}
+	
+	value = bpf_map_lookup_elem(&flow_map, &fl);
+	if (value) 
+	{
+		bpf_printk("Flow already exists\n");
+    	return XDP_PASS;
+	} 
+	else 
+	{
+		__u8 val = 1;
+		bpf_map_update_elem(&flow_map, &fl, &val, BPF_ANY);
+	}
+	
+	
+	//così si rompe (penso per il l4_len condizionato dallo switch statement)
+	/*tls_start = l4_start + l4_len; //l4_len brakes it, i think its because the switch statement
+	
+	if (tls_start + 5 > data_end)
+	{
+		bpf_printk("No TLS packet\n");
+		goto output;
+	}
+
+	if (*((__u8*)tls_start) < 20 || *((__u8*)tls_start) > 24)
+	{
+		tls.content_type = 0;
+	}
+	else
+	{
+		tls.content_type = *((__u8*)tls_start);
+		tls.message_type = *((__u8*)tls_start + 1);
+	}*/
+output:
 	e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+
 	if (!e)
 		return 0;
 
-	/* fill out the sample with data */
-	task = (struct task_struct *)bpf_get_current_task();
+	e->fl = fl;
+	e->tls = tls;
 
-	e->exit_event = true;
-	e->duration_ns = duration_ns;
-	e->pid = pid;
-	e->ppid = BPF_CORE_READ(task, real_parent, tgid);
-	e->exit_code = (BPF_CORE_READ(task, exit_code) >> 8) & 0xff;
-	bpf_get_current_comm(&e->comm, sizeof(e->comm));
-
-	/* send data to user-space for post-processing */
 	bpf_ringbuf_submit(e, 0);
-	return 0;
+
+	return XDP_PASS;
 }
 
+char __license[] SEC("license") = "GPL";

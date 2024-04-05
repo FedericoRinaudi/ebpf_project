@@ -1,0 +1,1 @@
+{"bpf_skel":{"data_sections":[],"maps":[{"ident":"rodata","name":"bootstra.rodata"}],"obj_name":"bootstrap_bpf","progs":[{"attach":"xdp","link":true,"name":"xdp_parser_func"}]},"eunomia_version":"0.3.4"}

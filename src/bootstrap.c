@@ -1,11 +1,18 @@
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
 /* Copyright (c) 2020 Facebook */
 #include <argp.h>
+#include <arpa/inet.h>
+#include <assert.h>
+#include <bpf/libbpf.h>
+#include <linux/if_packet.h>
+#include <linux/if_ether.h>
+#include <linux/in.h>
+#include <net/if.h>
 #include <signal.h>
 #include <stdio.h>
-#include <time.h>
 #include <sys/resource.h>
-#include <bpf/libbpf.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include "bootstrap.h"
 #include "bootstrap.skel.h"
 
@@ -73,28 +80,116 @@ static void sig_handler(int sig)
 	exiting = true;
 }
 
+static inline void ltoa(uint32_t addr, char *dst)
+{
+	snprintf(dst, 16, "%u.%u.%u.%u", (addr >> 24) & 0xFF, (addr >> 16) & 0xFF,
+		 (addr >> 8) & 0xFF, (addr & 0xFF));
+}
+
 static int handle_event(void *ctx, void *data, size_t data_sz)
 {
-	const struct event *e = data;
-	struct tm *tm;
-	char ts[32];
-	time_t t;
+	const struct so_event *e = data;
 
-	time(&t);
-	tm = localtime(&t);
-	strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+	char sstr[16] = {}, dstr[16] = {};
 
-	if (e->exit_event) {
-		printf("%-8s %-5s %-16s %-7d %-7d [%u]",
-		       ts, "EXIT", e->comm, e->pid, e->ppid, e->exit_code);
-		if (e->duration_ns)
-			printf(" (%llums)", e->duration_ns / 1000000);
-		printf("\n");
-	} else {
-		printf("%-8s %-5s %-16s %-7d %-7d %s\n",
-		       ts, "EXEC", e->comm, e->pid, e->ppid, e->filename);
+
+	ltoa(e->fl.src_addr, sstr);
+	ltoa(e->fl.dst_addr, dstr);
+
+	printf("src ip: %s\nsrc port: %d\ndst ip: %s\ndst port: %d\nprotocol: ", sstr, e->fl.src_port, dstr, e->fl.dst_port);
+
+	switch (e->fl.ip_proto)
+	{
+	case IPPROTO_TCP:
+		printf("TCP");
+		break;
+	case IPPROTO_UDP:
+		printf("UDP");
+		break;
+	default:
+		printf("Unknown");
+		break;
 	}
 
+	if(e->tls.content_type == 0)
+	{
+		printf("\nNo TLS content\n\n");
+		return 0;
+	}
+
+	printf("\ntls content type: ");
+	switch (e->tls.content_type)
+	{
+	case 20:
+		printf("Change Cipher Spec: ");
+		break;
+	case 21:
+		printf("Alert");
+		break;
+	case 22:
+		printf("Handshake");
+		break;
+	case 23:
+		printf("Application Data");
+		break;
+	case 24:
+		printf("Heartbeat");
+		break;
+	default:
+		printf("Unknown");
+		break;
+	}
+
+	printf("\ntls message type: ");
+
+	switch (e->tls.message_type)
+	{
+	case 0:
+		printf("Hello Request");
+		break;
+	case 1:
+		printf("Client Hello");
+		break;
+	case 2:
+		printf("Server Hello");
+		break;
+	case 3:
+		printf("Hello Verify Request");
+		break;
+	case 4:
+		printf("New Session Ticket");
+		break;
+	case 8:
+		printf("Encrypted Extensions");
+		break;
+	case 11:
+		printf("Certificate");
+		break;
+	case 12:
+		printf("Server Key Exchange");
+		break;
+	case 13:
+		printf("Certificate Request");
+		break;
+	case 14:
+		printf("Server Hello Done");
+		break;
+	case 15:
+		printf("Certificate Verify");
+		break;
+	case 16:
+		printf("Client Key Exchange");
+		break;
+	case 20:
+		printf("Finished");
+		break;
+	default:
+		printf("Unknown or Encrypted");
+		break;
+	}
+
+	printf("\n\n");
+	
 	return 0;
 }
 
@@ -123,8 +218,9 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* Parameterize BPF code with minimum duration parameter */
-	skel->rodata->min_duration_ns = env.min_duration_ms * 1000000ULL;
+	//skel->links.xdp_parser_func = bpf_program__attach_xdp(skel->progs.xdp_parser_func, 2);
+	/* Parameterize BPF code with minimum duration parameter 
+	skel->rodata->min_duration_ns = env.min_duration_ms * 1000000ULL;*/
 
 	/* Load & verify BPF programs */
 	err = bootstrap_bpf__load(skel);
@@ -134,6 +230,9 @@ int main(int argc, char **argv)
 	}
 
 	/* Attach tracepoints */
+	skel->links.xdp_parser_func = bpf_program__attach_xdp(skel->progs.xdp_parser_func, 2);
+
+	/* Attach BPF programs */
 	err = bootstrap_bpf__attach(skel);
 	if (err) {
 		fprintf(stderr, "Failed to attach BPF skeleton\n");
@@ -147,10 +246,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Failed to create ring buffer\n");
 		goto cleanup;
 	}
-
-	/* Process events */
-	printf("%-8s %-5s %-16s %-7s %-7s %s\n",
-	       "TIME", "EVENT", "COMM", "PID", "PPID", "FILENAME/EXIT CODE");
+	
 	while (!exiting) {
 		err = ring_buffer__poll(rb, 100 /* timeout, ms */);
 		/* Ctrl-C will cause -EINTR */
@@ -162,6 +258,7 @@ int main(int argc, char **argv)
 			printf("Error polling perf buffer: %d\n", err);
 			break;
 		}
+		
 	}
 
 cleanup:
