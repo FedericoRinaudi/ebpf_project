@@ -2,6 +2,7 @@
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 #include "bootstrap.h"
+#include "flags.h"
 
 #define IP_MF 0x2000
 #define IP_OFFSET 0x1FFF
@@ -64,6 +65,7 @@ int  xdp_parser_func(struct xdp_md *ctx)
 		bpf_printk("No IP packet\n");
 		return XDP_PASS;
 	}
+
 	frag_off = bpf_ntohs(ip_v4->frag_off);
 
 	//TODO: fragmented packets support
@@ -77,59 +79,50 @@ int  xdp_parser_func(struct xdp_md *ctx)
 	fl.src_addr = bpf_ntohl(ip_v4->saddr);
 	fl.dst_addr = bpf_ntohl(ip_v4->daddr);
 
+	//l4 management
 	l4_start = l3_start + ip_len;
 
 	switch (l4_protocol)
 	{
 		case IPPROTO_TCP:
+
 			tcp = (struct tcphdr *) l4_start;
-			if ((void*) tcp + sizeof(struct tcphdr) > data_end){
-				bpf_printk("No TCP packet\n");
+
+			if ((void*) tcp + sizeof(struct tcphdr) > data_end)
 				return XDP_PASS;
-			}
+
 			fl.src_port = bpf_ntohs(tcp->source);
 			fl.dst_port = bpf_ntohs(tcp->dest);
 			fl.ip_proto = IPPROTO_TCP;
-			//l4_len = (__be16)(tcp->doff);
-			//l4_len <<= 2;
-			//da qua provo a commentate per veificare il funzionamento condizionato
-			tcp_len = (__be16)(tcp->doff);
-			tcp_len <<= 2;
-			tls_start = l4_start + tcp_len; //l4_len brakes it, i think its because the switch statement
-	
-			if (tls_start + 5 > data_end)
-			{
-				tls.content_type = 0;
-				goto output;
-			}
 
-			if (*((__u8*)tls_start) < 20 || *((__u8*)tls_start) > 24)
-			{		
-				tls.content_type = 0;
-			}
-			else
-			{
-				tls.content_type = *((__u8*)tls_start);
-				tls.message_type = *((__u8*)tls_start + 1);
-			}
+			l4_len = (__be16)(tcp->doff);
+			l4_len <<= 2;
+
 			break;
+
 		case IPPROTO_UDP:
+
 			udp = (struct udphdr *) l4_start;
-			if ((void*) udp + sizeof(struct udphdr) > data_end){
-				bpf_printk("No UDP packet\n");
+
+			if ((void*) udp + sizeof(struct udphdr) > data_end)
 				return XDP_PASS;
-			}
+
 			fl.src_port = bpf_ntohs(udp->source);
 			fl.dst_port = bpf_ntohs(udp->dest);
 			fl.ip_proto = IPPROTO_UDP;
-			//l4_len = 8;
+
+			l4_len = 8;
+
 			break;
 		default:
-			bpf_printk("Not a TCP or UDP packet\n");
 			return XDP_PASS;
 	}
 	
+
+	#if FIRST_PACKET_OF_FLOW_ONLY
+	//check if flow already exists
 	value = bpf_map_lookup_elem(&flow_map, &fl);
+
 	if (value) 
 	{
 		bpf_printk("Flow already exists\n");
@@ -140,27 +133,22 @@ int  xdp_parser_func(struct xdp_md *ctx)
 		__u8 val = 1;
 		bpf_map_update_elem(&flow_map, &fl, &val, BPF_ANY);
 	}
-	
-	
-	//così si rompe (penso per il l4_len condizionato dallo switch statement)
-	/*tls_start = l4_start + l4_len; //l4_len brakes it, i think its because the switch statement
-	
-	if (tls_start + 5 > data_end)
-	{
-		bpf_printk("No TLS packet\n");
-		goto output;
-	}
+	#endif
+	//tls management
+	tls_start = l4_start + l4_len;
 
-	if (*((__u8*)tls_start) < 20 || *((__u8*)tls_start) > 24)
+	//This check does not guarantee that the packet is a TLS packet
+	if (tls_start + 6 > data_end || *((__u8*)tls_start) < 20 || *((__u8*)tls_start) > 24)
 	{
 		tls.content_type = 0;
+		goto send;
 	}
-	else
-	{
-		tls.content_type = *((__u8*)tls_start);
-		tls.message_type = *((__u8*)tls_start + 1);
-	}*/
-output:
+
+	tls.content_type = *((__u8*)tls_start);
+	tls.message_type = *((__u8*)tls_start + 5);
+	
+
+send:
 	e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
 
 	if (!e)
@@ -173,5 +161,6 @@ output:
 
 	return XDP_PASS;
 }
+
 
 char __license[] SEC("license") = "GPL";
