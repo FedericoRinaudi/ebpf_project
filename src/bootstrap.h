@@ -11,7 +11,8 @@ struct flow {
 	__be32 dst_addr;
 	__be16 src_port;
 	__be16 dst_port;
-	__u8 ip_proto;
+	__be16 l3_proto;
+	__u8 l4_proto;
 };
 
 struct tls_info {

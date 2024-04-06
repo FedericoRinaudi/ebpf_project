@@ -86,19 +86,9 @@ static inline void ltoa(uint32_t addr, char *dst)
 		 (addr >> 8) & 0xFF, (addr & 0xFF));
 }
 
-static int handle_event(void *ctx, void *data, size_t data_sz)
+static inline void print_l4_proto(uint8_t proto)
 {
-	const struct so_event *e = data;
-
-	char sstr[16] = {}, dstr[16] = {};
-
-
-	ltoa(e->fl.src_addr, sstr);
-	ltoa(e->fl.dst_addr, dstr);
-
-	printf("src ip: %s\nsrc port: %d\ndst ip: %s\ndst port: %d\nprotocol: ", sstr, e->fl.src_port, dstr, e->fl.dst_port);
-
-	switch (e->fl.ip_proto)
+	switch (proto)
 	{
 	case IPPROTO_TCP:
 		printf("TCP");
@@ -110,15 +100,11 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 		printf("Unknown");
 		break;
 	}
+}
 
-	if(e->tls.content_type == 0)
-	{
-		printf("\nNo TLS content\n\n");
-		return 0;
-	}
-
-	printf("\ntls content type: ");
-	switch (e->tls.content_type)
+static inline void print_tls_content_type(uint8_t content_type)
+{
+	switch (content_type)
 	{
 	case 20:
 		printf("Change Cipher Spec: ");
@@ -139,10 +125,11 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 		printf("Unknown");
 		break;
 	}
+}
 
-	printf("\ntls message type: ");
-
-	switch (e->tls.message_type)
+static inline void print_tls_message_type(uint8_t message_type)
+{
+	switch (message_type)
 	{
 	case 0:
 		printf("Hello Request");
@@ -187,6 +174,33 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 		printf("Unknown or Encrypted");
 		break;
 	}
+}
+
+static int handle_event(void *ctx, void *data, size_t data_sz)
+{
+	const struct so_event *e = data;
+
+	char sstr[16] = {}, dstr[16] = {};
+
+
+	ltoa(e->fl.src_addr, sstr);
+	ltoa(e->fl.dst_addr, dstr);
+
+	printf("src ip: %s\nsrc port: %d\ndst ip: %s\ndst port: %d\nprotocol: ", sstr, e->fl.src_port, dstr, e->fl.dst_port);
+
+	print_l4_proto(e->fl.l4_proto);
+
+	if(e->tls.content_type == 0)
+	{
+		printf("\nNo TLS content\n\n");
+		return 0;
+	}
+
+	printf("\ntls content type: ");
+	print_tls_content_type(e->tls.content_type);
+
+	printf("\ntls message type: ");
+	print_tls_message_type(e->tls.message_type);
 
 	printf("\n\n");
 	
