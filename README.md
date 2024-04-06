@@ -35,8 +35,10 @@ sudo src/bootstrap
 ## **Missing features**
 
 - IPV6 support
+- Fragmentation support
 - QUIC recognition
 - Interface selection by command line argument
+- Tails to improve the performance
 
 ## **Problems**
 

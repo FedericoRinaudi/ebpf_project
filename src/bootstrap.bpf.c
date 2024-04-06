@@ -40,7 +40,6 @@ int  xdp_parser_func(struct xdp_md *ctx)
 	void *tls_start;
 	__u16 h_proto, frag_off, ip_len;
 	__be16 l4_len;
-	__be16 tcp_len;
 	__u8 *value, l4_protocol;
 	struct flow fl = {};
 	struct tls_info tls = {};
