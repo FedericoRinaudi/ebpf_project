@@ -16,7 +16,8 @@
 #include "bootstrap.h"
 #include "bootstrap.skel.h"
 
-static struct env {
+static struct env
+{
 	bool verbose;
 	long min_duration_ms;
 } env;
@@ -24,35 +25,51 @@ static struct env {
 const char *argp_program_version = "bootstrap 0.0";
 const char *argp_program_bug_address = "<bpf@vger.kernel.org>";
 const char argp_program_doc[] =
-"BPF bootstrap demo application.\n"
-"\n"
-"It traces process start and exits and shows associated \n"
-"information (filename, process duration, PID and PPID, etc).\n"
-"\n"
-"USAGE: ./bootstrap [-d <min-duration-ms>] [-v]\n";
+	"BPF XDP program that print infos on the first package of each flow.\n"
+	"\n"
+	"USAGE: ./bootstrap [-d <min-duration-ms>] [-v] <interface-name>\n";
 
 static const struct argp_option opts[] = {
-	{ "verbose", 'v', NULL, 0, "Verbose debug output" },
-	{ "duration", 'd', "DURATION-MS", 0, "Minimum process duration (ms) to report" },
+	{"verbose", 'v', NULL, 0, "Verbose debug output"},
+	{"duration", 'd', "DURATION-MS", 0, "Minimum process duration (ms) to report"},
 	{},
+};
+
+struct arguments
+{
+	char *interface_name;
 };
 
 static error_t parse_arg(int key, char *arg, struct argp_state *state)
 {
-	switch (key) {
+	struct arguments *arguments = state->input;
+	switch (key)
+	{
 	case 'v':
 		env.verbose = true;
 		break;
 	case 'd':
 		errno = 0;
 		env.min_duration_ms = strtol(arg, NULL, 10);
-		if (errno || env.min_duration_ms <= 0) {
+		if (errno || env.min_duration_ms <= 0)
+		{
 			fprintf(stderr, "Invalid duration: %s\n", arg);
 			argp_usage(state);
 		}
 		break;
 	case ARGP_KEY_ARG:
-		argp_usage(state);
+		if (state->arg_num >= 1)
+		{
+			argp_usage(state);
+		}
+		arguments->interface_name = arg;
+		break;
+	case ARGP_KEY_END:
+		if (state->arg_num < 1)
+		{
+			fprintf(stderr, "Interface name not provided\n");
+			argp_usage(state);
+		}
 		break;
 	default:
 		return ARGP_ERR_UNKNOWN;
@@ -83,7 +100,7 @@ static void sig_handler(int sig)
 static inline void ltoa(uint32_t addr, char *dst)
 {
 	snprintf(dst, 16, "%u.%u.%u.%u", (addr >> 24) & 0xFF, (addr >> 16) & 0xFF,
-		 (addr >> 8) & 0xFF, (addr & 0xFF));
+			 (addr >> 8) & 0xFF, (addr & 0xFF));
 }
 
 static inline void print_l4_proto(uint8_t proto)
@@ -182,7 +199,6 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 
 	char sstr[16] = {}, dstr[16] = {};
 
-
 	ltoa(e->fl.src_addr, sstr);
 	ltoa(e->fl.dst_addr, dstr);
 
@@ -190,7 +206,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 
 	print_l4_proto(e->fl.l4_proto);
 
-	if(e->tls.content_type == 0)
+	if (e->tls.content_type == 0)
 	{
 		printf("\nNo TLS content\n\n");
 		return 0;
@@ -203,7 +219,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 	print_tls_message_type(e->tls.message_type);
 
 	printf("\n\n");
-	
+
 	return 0;
 }
 
@@ -211,13 +227,21 @@ int main(int argc, char **argv)
 {
 	struct ring_buffer *rb = NULL;
 	struct bootstrap_bpf *skel;
+	struct arguments args;
 	int err;
 
 	/* Parse command line arguments */
-	err = argp_parse(&argp, argc, argv, 0, NULL, NULL);
+	err = argp_parse(&argp, argc, argv, 0, NULL, &args);
 	if (err)
 		return err;
 
+	unsigned int interface_index = if_nametoindex(args.interface_name);
+    if (interface_index == 0) {
+        printf("Invalid interface name '%s'\n", args.interface_name);
+        return 1;
+    }
+
+    printf("Listening on interface with name '%s' and index %d...\n\n", args.interface_name, interface_index);
 	/* Set up libbpf errors and debug info callback */
 	libbpf_set_print(libbpf_print_fn);
 
@@ -227,18 +251,20 @@ int main(int argc, char **argv)
 
 	/* Load and verify BPF application */
 	skel = bootstrap_bpf__open();
-	if (!skel) {
+	if (!skel)
+	{
 		fprintf(stderr, "Failed to open and load BPF skeleton\n");
 		return 1;
 	}
 
-	//skel->links.xdp_parser_func = bpf_program__attach_xdp(skel->progs.xdp_parser_func, 2);
-	/* Parameterize BPF code with minimum duration parameter 
+	// skel->links.xdp_parser_func = bpf_program__attach_xdp(skel->progs.xdp_parser_func, 2);
+	/* Parameterize BPF code with minimum duration parameter
 	skel->rodata->min_duration_ns = env.min_duration_ms * 1000000ULL;*/
 
 	/* Load & verify BPF programs */
 	err = bootstrap_bpf__load(skel);
-	if (err) {
+	if (err)
+	{
 		fprintf(stderr, "Failed to load and verify BPF skeleton\n");
 		goto cleanup;
 	}
@@ -248,31 +274,35 @@ int main(int argc, char **argv)
 
 	/* Attach BPF programs */
 	err = bootstrap_bpf__attach(skel);
-	if (err) {
+	if (err)
+	{
 		fprintf(stderr, "Failed to attach BPF skeleton\n");
 		goto cleanup;
 	}
 
 	/* Set up ring buffer polling */
 	rb = ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, NULL, NULL);
-	if (!rb) {
+	if (!rb)
+	{
 		err = -1;
 		fprintf(stderr, "Failed to create ring buffer\n");
 		goto cleanup;
 	}
-	
-	while (!exiting) {
+
+	while (!exiting)
+	{
 		err = ring_buffer__poll(rb, 100 /* timeout, ms */);
 		/* Ctrl-C will cause -EINTR */
-		if (err == -EINTR) {
+		if (err == -EINTR)
+		{
 			err = 0;
 			break;
 		}
-		if (err < 0) {
+		if (err < 0)
+		{
 			printf("Error polling perf buffer: %d\n", err);
 			break;
 		}
-		
 	}
 
 cleanup:

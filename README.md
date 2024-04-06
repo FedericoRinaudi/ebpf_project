@@ -29,7 +29,7 @@ make build
 You can run the binary with:
 
 ```console
-sudo src/bootstrap
+sudo src/bootstrap <interface-name>
 ```
 
 ## **Missing features**
