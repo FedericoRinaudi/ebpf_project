@@ -3,13 +3,7 @@
 #include <bpf/bpf_helpers.h>
 #include "bootstrap.h"
 #include "flags.h"
-
-#define IP_MF 0x2000
-#define IP_OFFSET 0x1FFF
-#define TC_ACT_OK 0
-#define ETH_P_IP 0x0800 /* Internet Protocol packet */
-#define ETH_HLEN 14
-
+#include "const.h"
 
 struct
 {
@@ -24,6 +18,11 @@ struct {
     __type(value, __u8);
 } flow_map SEC(".maps");
 
+static inline int is_little_endian() {
+    int num = 1;
+    return *(char *)&num == 1;
+}
+
 static inline int ip_is_fragment(struct iphdr *iph)
 {
 	return bpf_ntohs(iph->frag_off) & (IP_MF | IP_OFFSET);
@@ -33,16 +32,10 @@ static inline void* manage_ethernet(void* data, void* data_end, struct flow *fl)
 {
 	struct ethhdr *eth = data;
 
-	if (data + sizeof(struct ethhdr) > data_end)
+	if (data + ETH_HLEN > data_end)
 		return NULL;
 
 	fl->l3_proto = bpf_ntohs(eth->h_proto);
-
-	//TODO: add ipv6 support
-	if (fl->l3_proto != ETH_P_IP)
-	{
-		return NULL;
-	}
 
 	return data + ETH_HLEN;
 }
@@ -52,7 +45,7 @@ static inline void* manage_ipv4(void* data, void* data_end, struct flow *fl)
 
 	__u8 ip_len;
 	struct iphdr *ip_v4 = (struct iphdr *) data;
-	if ((void*) ip_v4 + sizeof(struct iphdr) > data_end){
+	if (data + IPV4_MIN_HLEN > data_end){
 		bpf_printk("No IP packet\n");
 		return NULL;
 	}
@@ -62,32 +55,85 @@ static inline void* manage_ipv4(void* data, void* data_end, struct flow *fl)
 		bpf_printk("Fragmented IP packet\n");
 		return NULL;
 	}
+	
 	ip_len = ip_v4->ihl << 2;
+	
+	if (data + ip_len > data_end)
+		return NULL;
+
 	fl->l4_proto = ip_v4->protocol;
-	fl->src_addr = bpf_ntohl(ip_v4->saddr);
-	fl->dst_addr = bpf_ntohl(ip_v4->daddr);
+	fl->src_addr.ipv4 = bpf_ntohl(ip_v4->saddr);
+	fl->dst_addr.ipv4 = bpf_ntohl(ip_v4->daddr);
 
 	return data + ip_len;
+}
+
+static inline struct in6_addr ntohin6_addr(struct in6_addr ipv6)
+{
+	struct in6_addr ret;
+	__u64 *src = (__u64 *)&ipv6;
+	__u64 *dst = (__u64 *)&ret;
+
+	if(is_little_endian())
+	{
+		dst[0] = bpf_ntohl(src[3]);
+		dst[1] = bpf_ntohl(src[2]);
+		dst[2] = bpf_ntohl(src[1]);
+		dst[3] = bpf_ntohl(src[0]);
+	}
+	else
+	{
+		ret = ipv6;
+	}
+
+	return ret;
+}
+
+//TODO: at the moment we are not managing extension headers. while cycle nedeed and it creates me problem with the verifier
+static inline void* manage_ipv6(void* data, void* data_end, struct flow *fl)
+{
+	struct ipv6hdr *ip_v6 = (struct ipv6hdr *) data;
+
+	if ((void*) ip_v6 + IPV6_HLEN > data_end)
+		return NULL;
+	
+	if(ip_v6->nexthdr != IPPROTO_TCP && ip_v6->nexthdr != IPPROTO_UDP)
+	{
+		bpf_printk("IPV6 extensione header not supported\n");
+		return NULL;
+	}
+
+	fl->l4_proto = ip_v6->nexthdr;
+	fl->src_addr.ipv6 = ntohin6_addr(ip_v6->saddr);
+	fl->dst_addr.ipv6 = ntohin6_addr(ip_v6->daddr);
+
+	return data + IPV6_HLEN;
 }
 
 static inline void* manage_tcp(void* data, void* data_end, struct flow *fl)
 {
 	struct tcphdr *tcp = (struct tcphdr *) data;
+	__u16 tcp_hlen;
 
-	if ((void*) tcp + sizeof(struct tcphdr) > data_end)
+	if (data + TCP_MIN_HLEN > data_end)
+		return NULL;
+
+	tcp_hlen = tcp->doff << 2;
+
+	if (data + tcp_hlen > data_end)
 		return NULL;
 
 	fl->src_port = bpf_ntohs(tcp->source);
 	fl->dst_port = bpf_ntohs(tcp->dest);
 
-	return data + (tcp->doff << 2);
+	return data + tcp_hlen;
 }
 
 static inline void* manage_udp(void* data, void* data_end, struct flow *fl)
 {
 	struct udphdr *udp = (struct udphdr *) data;
 
-	if ((void*) udp + sizeof(struct udphdr) > data_end)
+	if (data + 8 > data_end)
 		return NULL;
 
 	fl->src_port = bpf_ntohs(udp->source);
@@ -124,14 +170,21 @@ int  xdp_parser_func(struct xdp_md *ctx)
 	//l2 management
 
 	data = manage_ethernet(data, data_end, &fl);
-
 	if (!data)
 		return XDP_PASS;
 
 	//l3 management
-	//TODO: ipv6 support
-
-	data = manage_ipv4(data, data_end, &fl);
+	switch(fl.l3_proto)
+	{
+		case ETH_P_IPV4:
+			data = manage_ipv4(data, data_end, &fl);
+			break;
+		/*case ETH_P_IPV6:
+			data = manage_ipv6(data, data_end, &fl);
+			break;*/
+		default:
+			return XDP_PASS;
+	}
 
 	if (!data)
 		return XDP_PASS;

@@ -34,17 +34,17 @@ sudo src/bootstrap <interface-name>
 
 ## **Missing features**
 
-- IPV6 support
+- IPV6 extesion headers support
 - Fragmentation support
 - QUIC recognition
-- Interface selection by command line argument
-- Tails to improve the performance
+- Multiple TLS messagge in the same packet
+- Tails to improve performances
 
 ## **Problems**
 
 Still not able to test properly. I run it on the real network and it seems to work, but I need to test it on a controlled environment.
 
-I still don't understand if some of the fields are correct or not.
+The TLS recognition is not working properly. I'm not able to get the correct information from the packet.
 
 ## **License**
 I used eunomia-bpf template to create this project.

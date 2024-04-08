@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include "bootstrap.h"
 #include "bootstrap.skel.h"
+#include "const.h"
 
 static struct env
 {
@@ -97,10 +98,35 @@ static void sig_handler(int sig)
 	exiting = true;
 }
 
-static inline void ltoa(uint32_t addr, char *dst)
+static inline void print_ipv4(uint32_t addr)
 {
-	snprintf(dst, 16, "%u.%u.%u.%u", (addr >> 24) & 0xFF, (addr >> 16) & 0xFF,
+	printf("%u.%u.%u.%u", (addr >> 24) & 0xFF, (addr >> 16) & 0xFF,
 			 (addr >> 8) & 0xFF, (addr & 0xFF));
+}
+
+static inline void print_ipv6(struct in6_addr *addr)
+{
+	for(int i = 0; i < 8; i++){
+		if(i != 0)
+			printf(":");
+		printf("%x", ntohs(addr->__in6_u.__u6_addr16[i]));
+	}	
+}
+
+static inline void print_ip(ip_address *addr, __be16 proto)
+{
+	switch (proto)
+	{
+	case ETH_P_IPV4:
+		print_ipv4(addr->ipv4);
+		break;
+	case ETH_P_IPV6:
+		print_ipv6(&addr->ipv6);
+		break;
+	default:
+		printf("Unknown");
+		break;
+	}
 }
 
 static inline void print_l4_proto(uint8_t proto)
@@ -195,14 +221,17 @@ static inline void print_tls_message_type(uint8_t message_type)
 
 static int handle_event(void *ctx, void *data, size_t data_sz)
 {
-	const struct so_event *e = data;
+	struct so_event *e = data;
 
-	char sstr[16] = {}, dstr[16] = {};
+	printf("src ip: ");
 
-	ltoa(e->fl.src_addr, sstr);
-	ltoa(e->fl.dst_addr, dstr);
+	print_ip(&e->fl.src_addr, e->fl.l3_proto); 
+	
+	printf("\nsrc port: %d\ndst ip: ", e->fl.src_port);
 
-	printf("src ip: %s\nsrc port: %d\ndst ip: %s\ndst port: %d\nprotocol: ", sstr, e->fl.src_port, dstr, e->fl.dst_port);
+	print_ip(&e->fl.dst_addr, e->fl.l3_proto);
+
+	printf("\ndst port: %d\nprotocol: ", e->fl.dst_port);
 
 	print_l4_proto(e->fl.l4_proto);
 
