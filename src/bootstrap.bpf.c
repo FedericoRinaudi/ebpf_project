@@ -211,7 +211,7 @@ int  xdp_parser_func(struct xdp_md *ctx)
 	if (!data)
 		return XDP_PASS;
 
-	#if FIRST_PACKET_OF_FLOW_ONLY
+	//#if FIRST_PACKET_OF_FLOW_ONLY
 	//check if flow already exists
 	value = bpf_map_lookup_elem(&flow_map, &fl);
 
@@ -225,7 +225,7 @@ int  xdp_parser_func(struct xdp_md *ctx)
 		__u8 val = 1;
 		bpf_map_update_elem(&flow_map, &fl, &val, BPF_ANY);
 	}
-	#endif
+	//#endif
 
 	//tls management
 	manage_tls(data, data_end, &tls);

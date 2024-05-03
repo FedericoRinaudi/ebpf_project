@@ -299,7 +299,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Attach tracepoints */
-	skel->links.xdp_parser_func = bpf_program__attach_xdp(skel->progs.xdp_parser_func, 2);
+	skel->links.xdp_parser_func = bpf_program__attach_xdp(skel->progs.xdp_parser_func, interface_index);
 
 	/* Attach BPF programs */
 	err = bootstrap_bpf__attach(skel);

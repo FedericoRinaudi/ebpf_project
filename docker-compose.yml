@@ -1,0 +1,8 @@
+version: '3'
+services:
+  ebpf_project:
+    build: .
+    privileged: true
+    volumes:
+      - ./:/app/ebpf_project
+    
